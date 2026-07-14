@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -u
+
+url="${1:?missing login URL}"
+pin="${2:?missing device code}"
+mode="${3:-auto}"
+delay="${AUTOTORCH_BROWSER_DELAY:-2}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+open "$url"
+
+if [[ "$mode" == "manual" ]]; then
+  printf '%s' "$pin" | pbcopy
+  printf 'Login page opened; the one-time device code is in the clipboard.'
+  exit 0
+fi
+
+# This runs only during an explicit `autotorch connect`. It activates the browser
+# opened above, types the one-time code, and presses Next once. It never enters
+# a password and never clicks or approves Duo. Passing the PIN through argv
+# avoids embedding untrusted data in JXA source.
+if osascript -l JavaScript "$SCRIPT_DIR/autotorch-browser.js" "$pin" "$delay" >/dev/null 2>&1
+then
+  printf 'Login page opened; device code entered and Next submitted once.'
+else
+  printf '%s' "$pin" | pbcopy
+  printf 'Login page opened; UI automation was unavailable, so the code is in the clipboard.'
+fi

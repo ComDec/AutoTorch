@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+mkdir -p "$TMP/bin" "$TMP/home" "$TMP/state"
+export HOME="$TMP/home"
+export PATH="$TMP/bin:/usr/bin:/bin"
+export AUTOTORCH_STATE_DIR="$TMP/autotorch-state"
+export AUTOTORCH_NOTIFY_COOLDOWN=3600
+export AUTOTORCH_RECONNECT_COOLDOWN=900
+export FAKE_MASTER_STATE="$TMP/state/master"
+export FAKE_BROWSER_CALL="$TMP/state/browser-call"
+
+cat > "$TMP/bin/ssh" <<'FAKE_SSH'
+#!/usr/bin/env bash
+set -u
+
+if [[ "${1:-}" == "-G" ]]; then
+  cat <<EOF
+user testnetid
+hostname login.torch.hpc.nyu.edu
+controlmaster auto
+controlpath $HOME/.ssh/cm/fake-control
+controlpersist 86400
+serveraliveinterval 30
+serveralivecountmax 6
+EOF
+  exit 0
+fi
+
+if [[ "${1:-}" == "-O" && "${2:-}" == "check" ]]; then
+  if [[ -f "$FAKE_MASTER_STATE" ]]; then
+    printf 'Master running (pid=4242)\n' >&2
+    exit 0
+  fi
+  exit 255
+fi
+
+if [[ "${1:-}" == "-O" && "${2:-}" == "exit" ]]; then
+  rm -f "$FAKE_MASTER_STATE"
+  printf 'Exit request sent.\n' >&2
+  exit 0
+fi
+
+case " $* " in
+  *" BatchMode=yes "*)
+    if [[ -f "$FAKE_MASTER_STATE" ]]; then
+      printf 'remote.hostname=torch-login-test\n'
+      printf 'remote.user=testnetid\n'
+      printf 'remote.home=/home/testnetid\n'
+      printf 'remote.scratch=/scratch/testnetid\n'
+      printf 'remote.slurm=available\n'
+      printf 'remote.my_slurm_accounts=available\n'
+      exit 0
+    fi
+    exit 255
+    ;;
+esac
+
+printf '(testnetid@login) Authenticate with PIN ABCD1234 at https://microsoft.com/devicelogin and press ENTER.\n'
+IFS= read -r _answer || true
+touch "$FAKE_MASTER_STATE"
+exit 0
+FAKE_SSH
+
+cat > "$TMP/bin/browser-helper" <<'FAKE_BROWSER'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$3" >> "$FAKE_BROWSER_CALL"
+printf 'Browser helper test double completed.'
+FAKE_BROWSER
+
+cat > "$TMP/bin/osascript" <<'FAKE_OSASCRIPT'
+#!/usr/bin/env bash
+exit 0
+FAKE_OSASCRIPT
+
+chmod +x "$TMP/bin/ssh" "$TMP/bin/browser-helper" "$TMP/bin/osascript"
+export AUTOTORCH_BROWSER_HELPER="$TMP/bin/browser-helper"
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  [[ "$haystack" == *"$needle"* ]] || fail "expected output to contain: $needle"
+}
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  [[ "$haystack" != *"$needle"* ]] || fail "output unexpectedly contained: $needle"
+}
+
+bash -n "$ROOT/autotorch"
+bash -n "$ROOT/libexec/autotorch-browser-assist"
+bash -n "$ROOT/scripts/install-macos.sh"
+bash -n "$ROOT/scripts/uninstall-macos.sh"
+if command -v osacompile >/dev/null 2>&1; then
+  osacompile -l JavaScript -o "$TMP/autotorch-browser.scpt" "$ROOT/libexec/autotorch-browser.js"
+fi
+
+doctor_output="$($ROOT/autotorch doctor --host torch)"
+assert_contains "$doctor_output" "SSH multiplexing is ready"
+
+if "$ROOT/autotorch" status --host torch >/dev/null 2>&1; then
+  fail "status should report disconnected before authentication"
+fi
+
+monitor_output="$($ROOT/autotorch monitor --host torch)"
+[[ -z "$monitor_output" ]] || fail "monitor should be quiet"
+[[ ! -f "$FAKE_MASTER_STATE" ]] || fail "non-interactive reconnect must not fake MFA"
+
+connect_output="$($ROOT/autotorch connect --host torch --manual --wait 1 vv)"
+assert_contains "$connect_output" "SSH master ready"
+assert_not_contains "$connect_output" "ABCD1234"
+[[ -f "$FAKE_MASTER_STATE" ]] || fail "connect did not create the master"
+
+browser_output="$(cat "$FAKE_BROWSER_CALL")"
+assert_contains "$browser_output" "https://microsoft.com/devicelogin manual"
+
+status_output="$($ROOT/autotorch status --host torch 2>&1)"
+assert_contains "$status_output" "Master running"
+
+agent_output="$($ROOT/autotorch agent-check --host torch)"
+assert_contains "$agent_output" "remote.hostname=torch-login-test"
+assert_contains "$agent_output" "remote.slurm=available"
+
+skill_output="$($ROOT/skills/torch-hpc/scripts/preflight.sh torch)"
+assert_contains "$skill_output" "local.target=login.torch.hpc.nyu.edu"
+assert_contains "$skill_output" "remote.hostname=torch-login-test"
+
+line_count_before="$(wc -l < "$FAKE_BROWSER_CALL" | tr -d ' ')"
+reuse_output="$($ROOT/autotorch connect --host torch)"
+assert_contains "$reuse_output" "already connected"
+line_count_after="$(wc -l < "$FAKE_BROWSER_CALL" | tr -d ' ')"
+[[ "$line_count_before" == "$line_count_after" ]] || fail "reuse unexpectedly reopened browser auth"
+
+stop_output="$($ROOT/autotorch stop --host torch 2>&1)"
+assert_contains "$stop_output" "closed the torch SSH master"
+[[ ! -f "$FAKE_MASTER_STATE" ]] || fail "stop did not remove the master"
+
+CODEX_HOME="$TMP/codex" "$ROOT/scripts/install-skill.sh" >/dev/null
+[[ -f "$TMP/codex/skills/torch-hpc/SKILL.md" ]] || fail "skill installer did not copy SKILL.md"
+if CODEX_HOME="$TMP/codex" "$ROOT/scripts/install-skill.sh" >/dev/null 2>&1; then
+  fail "skill installer should refuse to overwrite without --force"
+fi
+CODEX_HOME="$TMP/codex" "$ROOT/scripts/install-skill.sh" --force >/dev/null
+
+printf 'All AutoTorch tests passed.\n'

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.comdec.autotorch.guardian</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__AUTOTORCH_PATH__</string>
+    <string>monitor</string>
+    <string>--host</string>
+    <string>torch</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/guardian.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/guardian-error.log</string>
+</dict>
+</plist>

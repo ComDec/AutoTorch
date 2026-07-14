@@ -1,0 +1,138 @@
+#!/usr/bin/expect -f
+
+# Start a durable OpenSSH master and complete Torch's device-code handshake.
+# The browser helper may enter the one-time code and press Next, but the user
+# remains responsible for account selection, password entry, and Duo approval.
+
+set timeout 180
+
+if {$argc < 1} {
+  puts stderr "AutoTorch: missing SSH host alias."
+  exit 2
+}
+
+set server [lindex $argv 0]
+set ui_mode "auto"
+set auth_wait 20
+if {$argc >= 2} { set ui_mode [lindex $argv 1] }
+if {$argc >= 3} { set auth_wait [lindex $argv 2] }
+
+if {![string is integer -strict $auth_wait] || $auth_wait < 1 || $auth_wait > 300} {
+  puts stderr "AutoTorch: --wait must be an integer between 1 and 300."
+  exit 2
+}
+
+if {[info exists env(LOGIN_VERBOSE)]} {
+  set verbose $env(LOGIN_VERBOSE)
+} else {
+  set verbose 1
+}
+
+if {[info exists env(AUTOTORCH_BROWSER_HELPER)]} {
+  set browser_helper $env(AUTOTORCH_BROWSER_HELPER)
+} else {
+  set browser_helper [file join [file dirname [info script]] "autotorch-browser-assist"]
+}
+
+set login_url "https://microsoft.com/devicelogin"
+
+proc log {level message} {
+  if {$::verbose >= $level} {
+    set timestamp [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+    puts [format {[%s] %s} $timestamp $message]
+  }
+}
+
+proc master_ready {server} {
+  if {![catch {exec ssh -O check $server 2>@1} output]} {
+    return [string match "*Master running*" $output]
+  }
+  return 0
+}
+
+if {[master_ready $server]} {
+  log 0 "$server is already connected; reusing the existing master."
+  exit 0
+}
+
+log 1 "Starting a dedicated SSH master for $server..."
+log_user 0
+
+# -f backgrounds only after authentication succeeds. ControlPersist=yes keeps
+# this explicit master available until it is stopped or the network/server
+# closes the underlying TCP connection.
+spawn ssh -MNf \
+  -o ControlMaster=yes \
+  -o ControlPersist=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=6 \
+  -o TCPKeepAlive=yes \
+  $server
+
+set saw_device_code 0
+set auth_failed 0
+
+expect {
+  -re {Authenticate with PIN ([A-Za-z0-9-]+)} {
+    set saw_device_code 1
+    set pin [string trim $expect_out(1,string)]
+    log 1 "Torch requested Microsoft device authentication."
+
+    if {![file executable $browser_helper]} {
+      log 0 "Browser helper is missing or not executable: $browser_helper"
+      exit 1
+    }
+
+    if {[catch {exec $browser_helper $login_url $pin $ui_mode 2>@1} helper_output]} {
+      log 0 "Could not launch browser assistance."
+      log 2 "Browser helper diagnostic: [string trim $helper_output]"
+      log 0 "Open $login_url and enter the code shown by SSH manually."
+    } elseif {$verbose >= 1 && [string trim $helper_output] ne ""} {
+      log 1 [string trim $helper_output]
+    }
+
+    log 0 "Complete account selection and Duo in the browser."
+    log 0 "AutoTorch will submit the completed browser authentication in ${auth_wait}s."
+    after [expr {$auth_wait * 1000}]
+
+    # Torch explicitly asks the SSH client to press Enter only after the web
+    # authentication has completed. Exactly one Enter is sent.
+    send "\r"
+    exp_continue
+  }
+  -re {[Pp]ermission denied|Authentication failed|Access denied} {
+    set auth_failed 1
+  }
+  -re {REMOTE HOST IDENTIFICATION HAS CHANGED} {
+    log 0 "Host-key verification failed. Review your Torch SSH configuration."
+    set auth_failed 1
+  }
+  -re {Could not resolve hostname|Connection timed out|Connection reset by peer|No route to host} {
+    log 0 "SSH transport failed before authentication: [string trim $expect_out(0,string)]"
+    set auth_failed 1
+  }
+  timeout {
+    log 0 "Timed out waiting for Torch authentication."
+    set auth_failed 1
+  }
+  eof {}
+}
+
+if {$auth_failed} {
+  log 0 "Connection was not established. Check NYU VPN and retry."
+  exit 1
+}
+
+# Give the backgrounded master a brief moment to publish its control socket.
+after 500
+if {[master_ready $server]} {
+  if {$saw_device_code} {
+    log 0 "SSH master ready. New terminals and IDE sessions can reuse it."
+  } else {
+    log 0 "SSH master restored without a new interactive MFA prompt."
+  }
+  exit 0
+}
+
+log 0 "SSH exited without creating a reusable control master."
+exit 1

@@ -1,0 +1,4 @@
+interface:
+  display_name: "NYU Torch HPC"
+  short_description: "Persistent SSH and safe Slurm workflows"
+  default_prompt: "Use $torch-hpc to connect through AutoTorch and run this task safely on NYU Torch."

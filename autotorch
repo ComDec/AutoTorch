@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+
+set -u
+
+VERSION="0.1.0"
+DEFAULT_HOST="${AUTOTORCH_HOST:-torch}"
+STATE_DIR="${AUTOTORCH_STATE_DIR:-$HOME/Library/Application Support/AutoTorch/state}"
+NOTIFY_COOLDOWN="${AUTOTORCH_NOTIFY_COOLDOWN:-3600}"
+RECONNECT_COOLDOWN="${AUTOTORCH_RECONNECT_COOLDOWN:-900}"
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d "$SELF_DIR/libexec" ]]; then
+  LIBEXEC_DIR="$SELF_DIR/libexec"
+elif [[ -d "$SELF_DIR/../libexec" ]]; then
+  LIBEXEC_DIR="$(cd "$SELF_DIR/../libexec" && pwd)"
+else
+  LIBEXEC_DIR="${AUTOTORCH_LIBEXEC:-$SELF_DIR/libexec}"
+fi
+
+usage() {
+  cat <<'EOF'
+AutoTorch — durable, user-approved SSH access to NYU Torch
+
+Usage:
+  autotorch [connect] [options]       Start or reuse the Torch SSH master
+  autotorch status [--host HOST]     Show whether the master is healthy
+  autotorch stop [--host HOST]       Close the shared master cleanly
+  autotorch doctor [--host HOST]     Check local SSH multiplexing settings
+  autotorch agent-check [--host HOST] Verify agent-safe non-interactive access
+  autotorch monitor [--host HOST]    Quiet guardian check (for launchd)
+
+Connect options:
+  --host HOST       SSH alias (default: torch)
+  --wait SECONDS    Wait before submitting browser auth (default: 20)
+  --manual          Open the login page and copy the code; do not type it
+  --ui-auto         Type the device code and press Next once (default)
+  quiet | q         Minimal output
+  verbose | v       Normal output (default)
+  vv                Extra diagnostic output
+
+AutoTorch never stores an NYU password and never approves Duo. If a genuinely
+new SSH connection requires MFA, the user must approve it.
+EOF
+}
+
+die() {
+  printf 'AutoTorch: %s\n' "$*" >&2
+  exit 1
+}
+
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+ssh_value() {
+  local host="$1"
+  local key="$2"
+  ssh -G "$host" 2>/dev/null | awk -v wanted="$key" '$1 == wanted { print $2; exit }'
+}
+
+master_is_running() {
+  local host="$1"
+  ssh -O check "$host" >/dev/null 2>&1
+}
+
+ensure_control_directory() {
+  local host="$1"
+  local path
+  path="$(ssh_value "$host" controlpath)"
+  [[ -n "$path" && "$path" != "none" ]] || return 0
+  mkdir -p "$(dirname "$path")"
+  chmod 700 "$(dirname "$path")" 2>/dev/null || true
+}
+
+remove_stale_control_socket() {
+  local host="$1"
+  local path
+  path="$(ssh_value "$host" controlpath)"
+  [[ -n "$path" && "$path" != "none" ]] || return 0
+  if ! master_is_running "$host" && [[ -e "$path" ]]; then
+    rm -f "$path"
+  fi
+}
+
+parse_common_options() {
+  PARSED_HOST="$DEFAULT_HOST"
+  PARSED_WAIT="${AUTOTORCH_AUTH_WAIT:-20}"
+  PARSED_UI_MODE="${AUTOTORCH_UI_MODE:-auto}"
+  PARSED_VERBOSE="${LOGIN_VERBOSE:-1}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)
+        [[ $# -ge 2 ]] || die "--host needs a value"
+        PARSED_HOST="$2"
+        shift 2
+        ;;
+      --wait)
+        [[ $# -ge 2 ]] || die "--wait needs a value"
+        PARSED_WAIT="$2"
+        shift 2
+        ;;
+      --manual)
+        PARSED_UI_MODE="manual"
+        shift
+        ;;
+      --ui-auto)
+        PARSED_UI_MODE="auto"
+        shift
+        ;;
+      quiet|q)
+        PARSED_VERBOSE=0
+        shift
+        ;;
+      verbose|v)
+        PARSED_VERBOSE=1
+        shift
+        ;;
+      vv)
+        PARSED_VERBOSE=2
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -* )
+        die "unknown option: $1"
+        ;;
+      *)
+        # Backward compatibility: `autotorch torch`.
+        PARSED_HOST="$1"
+        shift
+        ;;
+    esac
+  done
+}
+
+connect_master() {
+  parse_common_options "$@"
+  local host="$PARSED_HOST"
+
+  need_command ssh
+  need_command expect
+
+  if master_is_running "$host"; then
+    printf 'AutoTorch: %s is already connected; reusing the existing SSH master.\n' "$host"
+    return 0
+  fi
+
+  local controlmaster controlpath
+  controlmaster="$(ssh_value "$host" controlmaster)"
+  controlpath="$(ssh_value "$host" controlpath)"
+  [[ -n "$controlpath" && "$controlpath" != "none" ]] || {
+    die "$host has no ControlPath. Run 'autotorch doctor --host $host' for the required SSH config."
+  }
+  [[ "$controlmaster" != "no" ]] || {
+    die "$host has ControlMaster disabled. Run 'autotorch doctor --host $host'."
+  }
+
+  ensure_control_directory "$host"
+  remove_stale_control_socket "$host"
+  [[ -x "$LIBEXEC_DIR/autotorch-auth.exp" ]] || {
+    die "authentication helper not found at $LIBEXEC_DIR/autotorch-auth.exp"
+  }
+
+  LOGIN_VERBOSE="$PARSED_VERBOSE" \
+  AUTOTORCH_BROWSER_HELPER="${AUTOTORCH_BROWSER_HELPER:-$LIBEXEC_DIR/autotorch-browser-assist}" \
+    "$LIBEXEC_DIR/autotorch-auth.exp" "$host" "$PARSED_UI_MODE" "$PARSED_WAIT"
+}
+
+show_status() {
+  parse_common_options "$@"
+  if master_is_running "$PARSED_HOST"; then
+    ssh -O check "$PARSED_HOST" 2>&1
+    return 0
+  fi
+  printf 'AutoTorch: %s is disconnected. Run: autotorch connect --host %s\n' \
+    "$PARSED_HOST" "$PARSED_HOST"
+  return 1
+}
+
+stop_master() {
+  parse_common_options "$@"
+  if master_is_running "$PARSED_HOST"; then
+    ssh -O exit "$PARSED_HOST"
+    printf 'AutoTorch: closed the %s SSH master.\n' "$PARSED_HOST"
+  else
+    printf 'AutoTorch: %s is already disconnected.\n' "$PARSED_HOST"
+  fi
+}
+
+agent_check() {
+  parse_common_options "$@"
+  local host="$PARSED_HOST"
+
+  if ! master_is_running "$host"; then
+    printf 'AutoTorch: %s has no authenticated master. A user must run: autotorch connect --host %s\n' \
+      "$host" "$host" >&2
+    return 2
+  fi
+
+  ssh \
+    -o BatchMode=yes \
+    -o NumberOfPasswordPrompts=0 \
+    -o ConnectTimeout=8 \
+    "$host" \
+    'printf "remote.hostname=%s\n" "$(hostname)"; printf "remote.user=%s\n" "$(id -un)"; printf "remote.home=%s\n" "$HOME"; printf "remote.scratch=%s\n" "${SCRATCH:-/scratch/$USER}"; if command -v sbatch >/dev/null 2>&1; then printf "remote.slurm=available\n"; else printf "remote.slurm=missing\n"; fi; if command -v my_slurm_accounts >/dev/null 2>&1; then printf "remote.my_slurm_accounts=available\n"; else printf "remote.my_slurm_accounts=missing\n"; fi'
+}
+
+doctor() {
+  parse_common_options "$@"
+  local host="$PARSED_HOST"
+  need_command ssh
+
+  local hostname user controlmaster controlpath controlpersist alive count
+  hostname="$(ssh_value "$host" hostname)"
+  user="$(ssh_value "$host" user)"
+  controlmaster="$(ssh_value "$host" controlmaster)"
+  controlpath="$(ssh_value "$host" controlpath)"
+  controlpersist="$(ssh_value "$host" controlpersist)"
+  alive="$(ssh_value "$host" serveraliveinterval)"
+  count="$(ssh_value "$host" serveralivecountmax)"
+
+  printf 'AutoTorch doctor %s\n' "$VERSION"
+  printf '  alias:               %s\n' "$host"
+  printf '  target:              %s@%s\n' "${user:-?}" "${hostname:-?}"
+  printf '  ControlMaster:       %s\n' "${controlmaster:-missing}"
+  printf '  ControlPath:         %s\n' "${controlpath:-missing}"
+  printf '  ControlPersist:      %s\n' "${controlpersist:-missing}"
+  printf '  ServerAliveInterval: %s\n' "${alive:-missing}"
+  printf '  ServerAliveCountMax: %s\n' "${count:-missing}"
+
+  local failed=0
+  [[ "$hostname" == "login.torch.hpc.nyu.edu" ]] || {
+    printf '  WARN: expected HostName login.torch.hpc.nyu.edu\n'
+  }
+  [[ "$controlmaster" == "auto" || "$controlmaster" == "yes" || "$controlmaster" == "autoask" || "$controlmaster" == "ask" ]] || {
+    printf '  FAIL: ControlMaster must be auto or yes.\n'
+    failed=1
+  }
+  [[ -n "$controlpath" && "$controlpath" != "none" ]] || {
+    printf '  FAIL: ControlPath is required.\n'
+    failed=1
+  }
+  if [[ "$failed" -ne 0 ]]; then
+    cat <<'EOF'
+
+Add this to ~/.ssh/config, replacing YOUR_NETID:
+
+Host torch
+  HostName login.torch.hpc.nyu.edu
+  User YOUR_NETID
+  ControlMaster auto
+  ControlPath ~/.ssh/cm/%C
+  ControlPersist 24h
+  ServerAliveInterval 30
+  ServerAliveCountMax 6
+EOF
+    return 1
+  fi
+
+  ensure_control_directory "$host"
+  printf '  OK: SSH multiplexing is ready.\n'
+}
+
+read_epoch() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    cat "$file" 2>/dev/null || printf '0'
+  else
+    printf '0'
+  fi
+}
+
+notify_disconnected() {
+  local host="$1"
+  command -v osascript >/dev/null 2>&1 || return 0
+  osascript -e 'display notification "Run autotorch connect when convenient; NYU may require Duo." with title "AutoTorch: Torch disconnected"' >/dev/null 2>&1 || true
+}
+
+monitor_once() {
+  parse_common_options "$@"
+  local host="$PARSED_HOST"
+  local key state_file reconnect_file notify_file now last
+  key="$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '_')"
+  mkdir -p "$STATE_DIR"
+  state_file="$STATE_DIR/$key.state"
+  reconnect_file="$STATE_DIR/$key.last-reconnect"
+  notify_file="$STATE_DIR/$key.last-notify"
+  now="$(date +%s)"
+
+  if master_is_running "$host"; then
+    printf 'online\n' > "$state_file"
+    return 0
+  fi
+
+  # A quiet, non-interactive reconnect is safe and never opens a browser. It
+  # succeeds only when the server can authenticate without a fresh MFA flow.
+  last="$(read_epoch "$reconnect_file")"
+  if [[ "$last" =~ ^[0-9]+$ ]] && (( now - last >= RECONNECT_COOLDOWN )); then
+    printf '%s\n' "$now" > "$reconnect_file"
+    ssh -MNf \
+      -o BatchMode=yes \
+      -o NumberOfPasswordPrompts=0 \
+      -o ConnectTimeout=8 \
+      "$host" >/dev/null 2>&1 || true
+    if master_is_running "$host"; then
+      printf 'online\n' > "$state_file"
+      return 0
+    fi
+  fi
+
+  printf 'offline\n' > "$state_file"
+  last="$(read_epoch "$notify_file")"
+  if [[ "$last" =~ ^[0-9]+$ ]] && (( now - last >= NOTIFY_COOLDOWN )); then
+    printf '%s\n' "$now" > "$notify_file"
+    notify_disconnected "$host"
+  fi
+  return 0
+}
+
+main() {
+  local command="${1:-connect}"
+  case "$command" in
+    connect|status|stop|doctor|agent-check|monitor)
+      shift || true
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    --version|version)
+      printf 'AutoTorch %s\n' "$VERSION"
+      exit 0
+      ;;
+    quiet|q|verbose|v|vv|--host|--wait|--manual|--ui-auto)
+      # Preserve the original command's `autotorch [verbosity] [host]` interface.
+      command="connect"
+      ;;
+    *)
+      # A bare host alias is also treated as connect.
+      command="connect"
+      ;;
+  esac
+
+  case "$command" in
+    connect) connect_master "$@" ;;
+    status) show_status "$@" ;;
+    stop) stop_master "$@" ;;
+    doctor) doctor "$@" ;;
+    agent-check) agent_check "$@" ;;
+    monitor) monitor_once "$@" ;;
+  esac
+}
+
+main "$@"
