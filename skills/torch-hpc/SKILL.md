@@ -16,12 +16,28 @@ Torch. Keep authentication user-approved and keep compute work off login nodes.
    skills/torch-hpc/scripts/preflight.sh torch
    ```
 
-2. If it reports no authenticated master, run `autotorch connect` locally.
+2. If it reports no authenticated master, run `autotorch connect --wait 120`
+   locally and keep that process running until it succeeds or fails.
    When the browser has a cached NYU session, AutoTorch completes the device
    code, default-account, and Continue steps automatically and submits to SSH
-   as soon as Microsoft reports success. If Microsoft instead presents a new
-   password or MFA challenge, stop and ask the user to complete that genuine
-   factor; never fabricate or store it.
+   as soon as Microsoft reports success.
+
+   If AutoTorch reports that UI automation is unavailable and Computer Use is
+   available, the agent should finish the cached-session flow itself without
+   asking the user to click:
+
+   - Verify that the foreground browser is on an exact Microsoft login domain
+     and the path is `/common/oauth2/deviceauth`.
+   - Paste the clipboard into the focused device-code field and submit Next.
+     Do not read, log, or echo the short-lived device code.
+   - Select the already signed-in default `@nyu.edu` work/school account, then
+     activate the focused Continue button.
+   - Verify the browser reaches `login.microsoftonline.com/appverify`; the
+     running AutoTorch process will detect it and immediately continue SSH.
+
+   If Microsoft instead presents a password, new MFA challenge, unexpected
+   account, CAPTCHA, or non-Microsoft page, stop and ask the user to complete
+   the genuine factor; never fabricate or store it.
    For an unconfigured machine, ask the user to run `autotorch setup` first;
    the interactive setup safely backs up and configures `~/.ssh/config`.
 3. After preflight succeeds, run every agent SSH command with:
