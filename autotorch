@@ -408,6 +408,17 @@ doctor() {
   printf '  ServerAliveInterval: %s\n' "${alive:-missing}"
   printf '  ServerAliveCountMax: %s\n' "${count:-missing}"
 
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+    local ui_scripting
+    ui_scripting="$(osascript -e 'tell application "System Events" to UI elements enabled' 2>/dev/null || true)"
+    if [[ "$ui_scripting" == "true" ]]; then
+      printf '  Browser UI typing:   ready for this launcher\n'
+    else
+      printf '  Browser UI typing:   disabled for this launcher (clipboard fallback works)\n'
+      printf '  INFO: enable Accessibility for the terminal that runs autotorch.\n'
+    fi
+  fi
+
   local failed=0
   [[ "$hostname" == "login.torch.hpc.nyu.edu" ]] || {
     printf '  WARN: expected HostName login.torch.hpc.nyu.edu\n'

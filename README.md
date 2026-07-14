@@ -66,6 +66,11 @@ device code and submit **Next** once. If permission is denied or browser focus
 cannot be verified, AutoTorch safely puts the code in the clipboard instead.
 You still select the NYU account, enter the password, and approve Duo yourself.
 
+The permission belongs to the app that launches AutoTorch. For example, a
+connection started in Ghostty needs **Ghostty** enabled under System Settings →
+Privacy & Security → Accessibility. A connection launched by a coding-agent
+app may have a different permission and can safely fall back to the clipboard.
+
 Non-interactive configuration is also supported:
 
 ```bash
@@ -219,7 +224,8 @@ autotorch doctor
 ```
 
 It reports the resolved executable and helper directories as well as the
-effective SSH multiplexing settings. If an older installation reports
+effective SSH multiplexing settings. On macOS it also reports whether browser
+UI typing is enabled for the app that launched `autotorch`. If an older installation reports
 `authentication helper not found at ~/.local/bin/libexec/...`, update the
 repository and rerun `./scripts/install-macos.sh`. AutoTorch 0.2.0 and later
 resolve the `~/.local/bin/autotorch` symlink before locating helpers.
@@ -230,6 +236,12 @@ manually at `https://microsoft.com/devicelogin`, or run:
 ```bash
 autotorch connect --manual --wait 45
 ```
+
+For automatic typing, open System Settings → Privacy & Security →
+Accessibility and enable the terminal app that runs AutoTorch (Terminal,
+iTerm2, Ghostty, and coding-agent apps have separate permissions). Then quit
+and reopen that terminal before retrying. AutoTorch never requires this
+permission for its background guardian.
 
 If SSH cannot reach Torch, confirm NYU VPN/campus network first. AutoTorch
 cannot repair a VPN outage or bypass a new Microsoft/Duo challenge.

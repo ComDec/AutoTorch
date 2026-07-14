@@ -114,6 +114,7 @@ fi
 doctor_output="$($ROOT/autotorch doctor --host torch)"
 assert_contains "$doctor_output" "SSH multiplexing is ready"
 assert_contains "$doctor_output" "auth helper:          ready"
+assert_contains "$doctor_output" "Browser UI typing:"
 
 mkdir -p "$HOME/.ssh"
 printf 'Host example\n  HostName example.com\n' > "$HOME/.ssh/config"
