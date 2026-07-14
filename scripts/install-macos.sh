@@ -36,5 +36,5 @@ printf 'AutoTorch installed.\n'
 printf '  command: %s\n' "$USER_BIN/autotorch"
 printf '  guardian: %s\n' "$PLIST"
 printf '\nEnsure ~/.local/bin is on PATH, then run:\n'
-printf '  autotorch doctor\n'
-printf '  autotorch connect\n'
+printf '  autotorch setup\n'
+printf '\nFor a complete first-time setup, run ./scripts/bootstrap-macos.sh instead.\n'

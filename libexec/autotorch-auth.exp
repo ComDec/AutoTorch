@@ -73,9 +73,10 @@ set saw_device_code 0
 set auth_failed 0
 
 expect {
-  -re {Authenticate with PIN ([A-Za-z0-9-]+)} {
+  -re {Authenticate with PIN ([A-Za-z0-9-]+) at (https://[^[:space:]]+)} {
     set saw_device_code 1
     set pin [string trim $expect_out(1,string)]
+    set login_url [string trimright $expect_out(2,string) ".,"]
     log 1 "Torch requested Microsoft device authentication."
 
     if {![file executable $browser_helper]} {
@@ -100,7 +101,8 @@ expect {
     send "\r"
     exp_continue
   }
-  -re {[Pp]ermission denied|Authentication failed|Access denied} {
+  -re {[Pp]ermission denied[^\r\n]*|Authentication failed|Access denied} {
+    log 0 "SSH authentication was rejected: [string trim $expect_out(0,string)]"
     set auth_failed 1
   }
   -re {REMOTE HOST IDENTIFICATION HAS CHANGED} {

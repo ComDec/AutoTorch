@@ -8,6 +8,15 @@ mode="${3:-auto}"
 delay="${AUTOTORCH_BROWSER_DELAY:-2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+case "$url" in
+  https://microsoft.com/*|https://login.microsoft.com/*|https://login.microsoftonline.com/*)
+    ;;
+  *)
+    printf 'Refusing to open an untrusted device-login URL.' >&2
+    exit 2
+    ;;
+esac
+
 open "$url"
 
 if [[ "$mode" == "manual" ]]; then

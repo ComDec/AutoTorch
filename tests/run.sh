@@ -101,13 +101,48 @@ assert_not_contains() {
 bash -n "$ROOT/autotorch"
 bash -n "$ROOT/libexec/autotorch-browser-assist"
 bash -n "$ROOT/scripts/install-macos.sh"
+bash -n "$ROOT/scripts/bootstrap-macos.sh"
 bash -n "$ROOT/scripts/uninstall-macos.sh"
 if command -v osacompile >/dev/null 2>&1; then
   osacompile -l JavaScript -o "$TMP/autotorch-browser.scpt" "$ROOT/libexec/autotorch-browser.js"
 fi
 
+if "$ROOT/libexec/autotorch-browser-assist" https://example.com/device CODE manual >/dev/null 2>&1; then
+  fail "browser helper accepted an untrusted login URL"
+fi
+
 doctor_output="$($ROOT/autotorch doctor --host torch)"
 assert_contains "$doctor_output" "SSH multiplexing is ready"
+assert_contains "$doctor_output" "auth helper:          ready"
+
+mkdir -p "$HOME/.ssh"
+printf 'Host example\n  HostName example.com\n' > "$HOME/.ssh/config"
+setup_output="$($ROOT/autotorch setup --host torch --netid abc123 --persist 24h --no-connect)"
+assert_contains "$setup_output" "configured torch for abc123@login.torch.hpc.nyu.edu"
+assert_contains "$(cat "$HOME/.ssh/config")" "# >>> AutoTorch managed Torch SSH config >>>"
+assert_contains "$(cat "$HOME/.ssh/config")" "User abc123"
+assert_contains "$(cat "$HOME/.ssh/config")" "ControlPersist 24h"
+assert_contains "$(cat "$HOME/.ssh/config")" "Host example"
+backup_count="$(find "$HOME/.ssh" -name 'config.autotorch-backup.*' | wc -l | tr -d ' ')"
+[[ "$backup_count" == "1" ]] || fail "setup did not back up an existing SSH config"
+$ROOT/autotorch setup --host torch --netid abc123 --persist 24h --no-connect >/dev/null
+managed_count="$(grep -c '^# >>> AutoTorch managed Torch SSH config >>>$' "$HOME/.ssh/config")"
+[[ "$managed_count" == "1" ]] || fail "setup duplicated its managed SSH block"
+
+# Reproduce the installed layout: the public command is a symlink, while its
+# helpers are a sibling of the real binary directory.
+mkdir -p "$TMP/installed/app/bin" "$TMP/installed/app/libexec" "$TMP/installed/local/bin"
+cp "$ROOT/autotorch" "$TMP/installed/app/bin/autotorch"
+cp "$ROOT/libexec/autotorch-auth.exp" "$TMP/installed/app/libexec/autotorch-auth.exp"
+chmod +x "$TMP/installed/app/bin/autotorch" "$TMP/installed/app/libexec/autotorch-auth.exp"
+ln -s "$TMP/installed/app/bin/autotorch" "$TMP/installed/local/bin/autotorch"
+installed_doctor="$($TMP/installed/local/bin/autotorch doctor --host torch)"
+installed_libexec="$(cd -P "$TMP/installed/app/libexec" && pwd)"
+assert_contains "$installed_doctor" "helper directory:     $installed_libexec"
+assert_contains "$installed_doctor" "auth helper:          ready"
+installed_connect="$($TMP/installed/local/bin/autotorch connect --host torch --manual --wait 1 vv)"
+assert_contains "$installed_connect" "SSH master ready"
+$TMP/installed/local/bin/autotorch stop --host torch >/dev/null 2>&1
 
 if "$ROOT/autotorch" status --host torch >/dev/null 2>&1; then
   fail "status should report disconnected before authentication"

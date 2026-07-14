@@ -19,6 +19,8 @@ Torch. Keep authentication user-approved and keep compute work off login nodes.
 2. If it reports no authenticated master, stop remote work and ask the user to
    run `autotorch connect` locally, finish Microsoft login, and approve Duo.
    Never automate the password or Duo approval.
+   For an unconfigured machine, ask the user to run `autotorch setup` first;
+   the interactive setup safely backs up and configures `~/.ssh/config`.
 3. After preflight succeeds, run every agent SSH command with:
 
    ```bash

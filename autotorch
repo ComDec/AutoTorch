@@ -2,19 +2,40 @@
 
 set -u
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 DEFAULT_HOST="${AUTOTORCH_HOST:-torch}"
 STATE_DIR="${AUTOTORCH_STATE_DIR:-$HOME/Library/Application Support/AutoTorch/state}"
 NOTIFY_COOLDOWN="${AUTOTORCH_NOTIFY_COOLDOWN:-3600}"
 RECONNECT_COOLDOWN="${AUTOTORCH_RECONNECT_COOLDOWN:-900}"
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "$SELF_DIR/libexec" ]]; then
+resolve_self_dir() {
+  local source="${BASH_SOURCE[0]}"
+  local directory target
+
+  # BASH_SOURCE keeps the path used to invoke the command. Resolve every
+  # symlink so an installed ~/.local/bin/autotorch finds helpers beside the
+  # real binary under ~/Library/Application Support/AutoTorch.
+  while [[ -L "$source" ]]; do
+    directory="$(cd -P "$(dirname "$source")" && pwd)"
+    target="$(readlink "$source")"
+    if [[ "$target" == /* ]]; then
+      source="$target"
+    else
+      source="$directory/$target"
+    fi
+  done
+  cd -P "$(dirname "$source")" && pwd
+}
+
+SELF_DIR="$(resolve_self_dir)"
+if [[ -n "${AUTOTORCH_LIBEXEC:-}" ]]; then
+  LIBEXEC_DIR="$AUTOTORCH_LIBEXEC"
+elif [[ -d "$SELF_DIR/libexec" ]]; then
   LIBEXEC_DIR="$SELF_DIR/libexec"
 elif [[ -d "$SELF_DIR/../libexec" ]]; then
   LIBEXEC_DIR="$(cd "$SELF_DIR/../libexec" && pwd)"
 else
-  LIBEXEC_DIR="${AUTOTORCH_LIBEXEC:-$SELF_DIR/libexec}"
+  LIBEXEC_DIR="$SELF_DIR/libexec"
 fi
 
 usage() {
@@ -22,6 +43,7 @@ usage() {
 AutoTorch — durable, user-approved SSH access to NYU Torch
 
 Usage:
+  autotorch setup [options]         Interactively configure SSH and connect
   autotorch [connect] [options]       Start or reuse the Torch SSH master
   autotorch status [--host HOST]     Show whether the master is healthy
   autotorch stop [--host HOST]       Close the shared master cleanly
@@ -38,9 +60,26 @@ Connect options:
   verbose | v       Normal output (default)
   vv                Extra diagnostic output
 
+Setup options:
+  --netid NETID      NYU NetID (prompted when omitted)
+  --persist TIME     Shared connection lifetime (default: 24h)
+  --no-connect       Configure only; do not start browser authentication
+
 AutoTorch never stores an NYU password and never approves Duo. If a genuinely
 new SSH connection requires MFA, the user must approve it.
 EOF
+}
+
+valid_host_alias() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+valid_netid() {
+  [[ "$1" =~ ^[A-Za-z][A-Za-z0-9._-]{1,63}$ ]]
+}
+
+valid_persist() {
+  [[ "$1" == "yes" || "$1" =~ ^[1-9][0-9]*[smhdw]$ ]]
 }
 
 die() {
@@ -140,6 +179,133 @@ parse_common_options() {
   done
 }
 
+setup_ssh() {
+  local host="$DEFAULT_HOST"
+  local netid=""
+  local persist="24h"
+  local connect_after=1
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)
+        [[ $# -ge 2 ]] || die "--host needs a value"
+        host="$2"
+        shift 2
+        ;;
+      --netid)
+        [[ $# -ge 2 ]] || die "--netid needs a value"
+        netid="$2"
+        shift 2
+        ;;
+      --persist)
+        [[ $# -ge 2 ]] || die "--persist needs a value"
+        persist="$2"
+        shift 2
+        ;;
+      --no-connect)
+        connect_after=0
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        die "unknown setup option: $1"
+        ;;
+    esac
+  done
+
+  valid_host_alias "$host" || die "invalid SSH alias: $host"
+  valid_persist "$persist" || die "--persist must be 'yes' or a duration such as 8h or 24h"
+
+  if [[ -z "$netid" ]]; then
+    local detected=""
+    if [[ "$(ssh_value "$host" hostname)" == "login.torch.hpc.nyu.edu" ]]; then
+      detected="$(ssh_value "$host" user)"
+    fi
+    [[ -t 0 ]] || die "setup needs --netid when stdin is not interactive"
+    if [[ -n "$detected" ]]; then
+      printf 'NYU NetID [%s]: ' "$detected"
+      IFS= read -r netid
+      netid="${netid:-$detected}"
+    else
+      printf 'NYU NetID: '
+      IFS= read -r netid
+    fi
+  fi
+  valid_netid "$netid" || die "invalid NYU NetID"
+
+  local ssh_dir="$HOME/.ssh"
+  local config="$ssh_dir/config"
+  local control_dir="$ssh_dir/cm"
+  local begin_marker="# >>> AutoTorch managed Torch SSH config >>>"
+  local end_marker="# <<< AutoTorch managed Torch SSH config <<<"
+  local clean_file new_file backup=""
+
+  umask 077
+  mkdir -p "$control_dir"
+  chmod 700 "$ssh_dir" "$control_dir"
+  touch "$config"
+  chmod 600 "$config"
+
+  if [[ -s "$config" ]]; then
+    backup="$config.autotorch-backup.$(date +%Y%m%d-%H%M%S)"
+    cp -p "$config" "$backup"
+  fi
+
+  clean_file="$(mktemp "$ssh_dir/config.autotorch-clean.XXXXXX")"
+  new_file="$(mktemp "$ssh_dir/config.autotorch-new.XXXXXX")"
+  awk -v begin="$begin_marker" -v end="$end_marker" '
+    $0 == begin { managed = 1; next }
+    $0 == end { managed = 0; next }
+    !managed { print }
+  ' "$config" > "$clean_file"
+
+  {
+    printf '%s\n' "$begin_marker"
+    printf 'Host %s\n' "$host"
+    printf '  HostName login.torch.hpc.nyu.edu\n'
+    printf '  User %s\n' "$netid"
+    printf '  StrictHostKeyChecking no\n'
+    printf '  UserKnownHostsFile /dev/null\n'
+    printf '  LogLevel ERROR\n'
+    printf '  ForwardAgent yes\n'
+    printf '  ControlMaster auto\n'
+    printf '  ControlPath ~/.ssh/cm/%%C\n'
+    printf '  ControlPersist %s\n' "$persist"
+    printf '  ServerAliveInterval 30\n'
+    printf '  ServerAliveCountMax 6\n'
+    printf '  TCPKeepAlive yes\n'
+    printf '%s\n\n' "$end_marker"
+    cat "$clean_file"
+  } > "$new_file"
+  chmod 600 "$new_file"
+  mv "$new_file" "$config"
+  rm -f "$clean_file"
+
+  printf 'AutoTorch: configured %s for %s@login.torch.hpc.nyu.edu.\n' "$host" "$netid"
+  if [[ -n "$backup" ]]; then
+    printf 'AutoTorch: previous SSH config backed up to %s\n' "$backup"
+  fi
+  doctor --host "$host"
+
+  if [[ "$connect_after" -eq 1 ]]; then
+    if [[ -t 0 ]]; then
+      local answer=""
+      printf '\nStart Microsoft device login now? [Y/n] '
+      IFS= read -r answer
+      case "$answer" in
+        n|N|no|NO|No)
+          printf 'Run autotorch connect when ready.\n'
+          return 0
+          ;;
+      esac
+    fi
+    connect_master --host "$host"
+  fi
+}
+
 connect_master() {
   parse_common_options "$@"
   local host="$PARSED_HOST"
@@ -227,6 +393,13 @@ doctor() {
   count="$(ssh_value "$host" serveralivecountmax)"
 
   printf 'AutoTorch doctor %s\n' "$VERSION"
+  printf '  executable directory: %s\n' "$SELF_DIR"
+  printf '  helper directory:     %s\n' "$LIBEXEC_DIR"
+  if [[ -x "$LIBEXEC_DIR/autotorch-auth.exp" ]]; then
+    printf '  auth helper:          ready\n'
+  else
+    printf '  auth helper:          MISSING\n'
+  fi
   printf '  alias:               %s\n' "$host"
   printf '  target:              %s@%s\n' "${user:-?}" "${hostname:-?}"
   printf '  ControlMaster:       %s\n' "${controlmaster:-missing}"
@@ -327,7 +500,7 @@ monitor_once() {
 main() {
   local command="${1:-connect}"
   case "$command" in
-    connect|status|stop|doctor|agent-check|monitor)
+    setup|connect|status|stop|doctor|agent-check|monitor)
       shift || true
       ;;
     -h|--help|help)
@@ -349,6 +522,7 @@ main() {
   esac
 
   case "$command" in
+    setup) setup_ssh "$@" ;;
     connect) connect_master "$@" ;;
     status) show_status "$@" ;;
     stop) stop_master "$@" ;;

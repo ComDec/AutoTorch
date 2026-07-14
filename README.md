@@ -44,7 +44,35 @@ Apptainer, and evidence-based troubleshooting.
 - An active Slurm project allocation for job submission
 - OpenSSH and Expect
 
-## SSH configuration
+## First-time setup (recommended)
+
+New users can install AutoTorch, configure the `torch` SSH alias, install the
+Codex skill, and start the Microsoft device-login flow with one interactive
+command:
+
+```bash
+git clone https://github.com/ComDec/AutoTorch.git
+cd AutoTorch
+./scripts/bootstrap-macos.sh
+```
+
+The setup asks for your NYU NetID, backs up an existing `~/.ssh/config`, writes
+an idempotent AutoTorch-managed block at the top, creates the protected control
+socket directory, runs `autotorch doctor`, and asks whether to connect now.
+
+On the first connection, macOS may ask whether your terminal may control
+System Events or the browser. Allowing it lets AutoTorch enter the short-lived
+device code and submit **Next** once. If permission is denied or browser focus
+cannot be verified, AutoTorch safely puts the code in the clipboard instead.
+You still select the NYU account, enter the password, and approve Duo yourself.
+
+Non-interactive configuration is also supported:
+
+```bash
+autotorch setup --netid YOUR_NETID --persist 24h --no-connect
+```
+
+## Manual SSH configuration
 
 Create the control-socket directory:
 
@@ -75,7 +103,7 @@ Host torch
 The host-key settings match NYU's current multi-login-node recommendation.
 Do not copy them to unrelated SSH hosts.
 
-## Quick start
+## Run from the repository without installing
 
 Run directly from the repository:
 
@@ -117,13 +145,16 @@ The guardian checks every five minutes, attempts a non-interactive reconnect at
 most every 15 minutes, and sends at most one disconnection notification per
 hour. A reconnect that needs MFA stops immediately.
 
-Ensure `~/.local/bin` is on `PATH`, then run:
+The installer only installs files. To configure SSH interactively afterward:
 
 ```bash
-autotorch doctor
-autotorch connect
+autotorch setup
 autotorch agent-check
 ```
+
+To upgrade an existing install after `git pull`, rerun
+`./scripts/install-macos.sh`; it replaces the installed command and helpers but
+does not modify `~/.ssh/config`.
 
 Uninstall the command and guardian without changing SSH config or logs:
 
@@ -152,6 +183,7 @@ Apptainer, or persistent Torch SSH tasks.
 
 ```bash
 autotorch connect                 # establish or reuse the durable master
+autotorch setup                   # interactive first-time SSH configuration
 autotorch connect --manual        # open page and copy code; no UI typing
 autotorch connect --wait 45       # allow a longer browser/Duo window
 autotorch status                  # query the local control master
@@ -177,6 +209,30 @@ AutoTorch keeps a healthy client connection alive indefinitely, subject to VPN,
 laptop, network, login-node, and NYU server policy. It cannot silently cross a
 new Microsoft/Duo challenge after a reboot, VPN change, long sleep, login-node
 restart, or server-side termination. That boundary is intentional.
+
+## Troubleshooting
+
+Run this first:
+
+```bash
+autotorch doctor
+```
+
+It reports the resolved executable and helper directories as well as the
+effective SSH multiplexing settings. If an older installation reports
+`authentication helper not found at ~/.local/bin/libexec/...`, update the
+repository and rerun `./scripts/install-macos.sh`. AutoTorch 0.2.0 and later
+resolve the `~/.local/bin/autotorch` symlink before locating helpers.
+
+If the browser opens but the code is not entered, paste the clipboard contents
+manually at `https://microsoft.com/devicelogin`, or run:
+
+```bash
+autotorch connect --manual --wait 45
+```
+
+If SSH cannot reach Torch, confirm NYU VPN/campus network first. AutoTorch
+cannot repair a VPN outage or bypass a new Microsoft/Duo challenge.
 
 ## Develop and verify
 
