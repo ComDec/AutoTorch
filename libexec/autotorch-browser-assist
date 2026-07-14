@@ -5,7 +5,7 @@ set -u
 url="${1:?missing login URL}"
 pin="${2:?missing device code}"
 mode="${3:-auto}"
-delay="${AUTOTORCH_BROWSER_DELAY:-2}"
+delay="${AUTOTORCH_BROWSER_DELAY:-0.2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 case "$url" in
@@ -17,22 +17,43 @@ case "$url" in
     ;;
 esac
 
+if [[ "$mode" == "status" ]]; then
+  jxa_output="$(osascript -l JavaScript "$SCRIPT_DIR/autotorch-browser.js" "$pin" 0 status 2>/dev/null || true)"
+  case "$jxa_output" in
+    *AUTOTORCH_AUTH_STATE=device*) printf 'AUTOTORCH_AUTH_STATE=device\n' ;;
+    *AUTOTORCH_AUTH_STATE=confirmation*) printf 'AUTOTORCH_AUTH_STATE=confirmation\n' ;;
+    *AUTOTORCH_AUTH_STATE=success*) printf 'AUTOTORCH_AUTH_STATE=success\n' ;;
+    *) printf 'AUTOTORCH_AUTH_STATE=other\n' ;;
+  esac
+  exit 0
+fi
+
 open "$url"
 
 if [[ "$mode" == "manual" ]]; then
   printf '%s' "$pin" | pbcopy
+  printf 'AUTOTORCH_AUTH_COMPLETE=0\n'
   printf 'Login page opened; the one-time device code is in the clipboard.'
   exit 0
 fi
 
 # This runs only during an explicit `autotorch connect`. It activates the browser
-# opened above, types the one-time code, and presses Next once. It never enters
-# a password and never clicks or approves Duo. Passing the PIN through argv
-# avoids embedding untrusted data in JXA source.
-if osascript -l JavaScript "$SCRIPT_DIR/autotorch-browser.js" "$pin" "$delay" >/dev/null 2>&1
+# opened above, types the one-time code, selects the already signed-in default
+# NYU account, and accepts Microsoft's Continue confirmation. It never types a
+# password or fabricates a new MFA factor. Passing the PIN through argv avoids
+# embedding untrusted data in JXA source.
+jxa_output=""
+if jxa_output="$(osascript -l JavaScript "$SCRIPT_DIR/autotorch-browser.js" "$pin" "$delay" 2>&1)"
 then
-  printf 'Login page opened; device code entered and Next submitted once.'
+  if [[ "$jxa_output" == *"AUTOTORCH_AUTH_COMPLETE=1"* ]]; then
+    printf 'AUTOTORCH_AUTH_COMPLETE=1\n'
+    printf 'Microsoft device login completed with the cached default NYU account.'
+  else
+    printf 'AUTOTORCH_AUTH_COMPLETE=0\n'
+    printf 'Login page opened, but automatic account verification was inconclusive.'
+  fi
 else
   printf '%s' "$pin" | pbcopy
+  printf 'AUTOTORCH_AUTH_COMPLETE=0\n'
   printf 'Login page opened; UI automation was unavailable, so the code is in the clipboard.'
 fi

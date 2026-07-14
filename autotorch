@@ -2,7 +2,7 @@
 
 set -u
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 DEFAULT_HOST="${AUTOTORCH_HOST:-torch}"
 STATE_DIR="${AUTOTORCH_STATE_DIR:-$HOME/Library/Application Support/AutoTorch/state}"
 NOTIFY_COOLDOWN="${AUTOTORCH_NOTIFY_COOLDOWN:-3600}"
@@ -53,7 +53,7 @@ Usage:
 
 Connect options:
   --host HOST       SSH alias (default: torch)
-  --wait SECONDS    Wait before submitting browser auth (default: 20)
+  --wait SECONDS    Manual/fallback wait only; auto mode submits ASAP (default: 20)
   --manual          Open the login page and copy the code; do not type it
   --ui-auto         Type the device code and press Next once (default)
   quiet | q         Minimal output
@@ -100,6 +100,16 @@ ssh_value() {
 master_is_running() {
   local host="$1"
   ssh -O check "$host" >/dev/null 2>&1
+}
+
+master_accepts_sessions() {
+  local host="$1"
+  ssh \
+    -o BatchMode=yes \
+    -o NumberOfPasswordPrompts=0 \
+    -o ConnectTimeout=8 \
+    -o ChannelTimeout=session=15s \
+    "$host" true >/dev/null 2>&1
 }
 
 ensure_control_directory() {
@@ -314,8 +324,12 @@ connect_master() {
   need_command expect
 
   if master_is_running "$host"; then
-    printf 'AutoTorch: %s is already connected; reusing the existing SSH master.\n' "$host"
-    return 0
+    if master_accepts_sessions "$host"; then
+      printf 'AutoTorch: %s is already connected; reusing the verified SSH master.\n' "$host"
+      return 0
+    fi
+    printf 'AutoTorch: existing control socket cannot open an agent session; rebuilding it.\n'
+    ssh -O exit "$host" >/dev/null 2>&1 || true
   fi
 
   local controlmaster controlpath
@@ -334,9 +348,18 @@ connect_master() {
     die "authentication helper not found at $LIBEXEC_DIR/autotorch-auth.exp"
   }
 
+  local auth_status=0
   LOGIN_VERBOSE="$PARSED_VERBOSE" \
   AUTOTORCH_BROWSER_HELPER="${AUTOTORCH_BROWSER_HELPER:-$LIBEXEC_DIR/autotorch-browser-assist}" \
-    "$LIBEXEC_DIR/autotorch-auth.exp" "$host" "$PARSED_UI_MODE" "$PARSED_WAIT"
+    "$LIBEXEC_DIR/autotorch-auth.exp" "$host" "$PARSED_UI_MODE" "$PARSED_WAIT" || auth_status=$?
+  [[ "$auth_status" -eq 0 ]] || return "$auth_status"
+
+  if ! master_accepts_sessions "$host"; then
+    printf 'AutoTorch: SSH control socket was created, but Torch did not open an agent session within 15s.\n' >&2
+    ssh -O exit "$host" >/dev/null 2>&1 || true
+    return 1
+  fi
+  printf 'AutoTorch: SSH master ready and agent session verified.\n'
 }
 
 show_status() {
@@ -374,6 +397,7 @@ agent_check() {
     -o BatchMode=yes \
     -o NumberOfPasswordPrompts=0 \
     -o ConnectTimeout=8 \
+    -o ChannelTimeout=session=15s \
     "$host" \
     'printf "remote.hostname=%s\n" "$(hostname)"; printf "remote.user=%s\n" "$(id -un)"; printf "remote.home=%s\n" "$HOME"; printf "remote.scratch=%s\n" "${SCRATCH:-/scratch/$USER}"; if command -v sbatch >/dev/null 2>&1; then printf "remote.slurm=available\n"; else printf "remote.slurm=missing\n"; fi; if command -v my_slurm_accounts >/dev/null 2>&1; then printf "remote.my_slurm_accounts=available\n"; else printf "remote.my_slurm_accounts=missing\n"; fi'
 }

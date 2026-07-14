@@ -3,8 +3,8 @@
 Persistent, user-approved SSH access to NYU Torch for terminals, IDEs, and
 coding agents.
 
-AutoTorch completes the mechanical part of Torch's Microsoft device-login
-flow, starts one durable OpenSSH ControlMaster, and lets every later
+AutoTorch completes Torch's cached Microsoft device-login flow, starts one
+durable OpenSSH ControlMaster, and lets every later
 `ssh torch` process reuse it. A low-priority macOS guardian monitors the master
 without interrupting the user. When NYU requires a genuinely new Duo approval,
 AutoTorch notifies the user instead of hanging an agent or trying to bypass MFA.
@@ -14,10 +14,12 @@ AutoTorch notifies the user instead of hanging an agent or trying to bypass MFA.
 An autonomous coding session cannot safely answer a device-code or Duo prompt.
 AutoTorch separates authentication from agent work:
 
-1. The user runs `autotorch connect` and approves Duo once.
-2. AutoTorch verifies and preserves the SSH master.
-3. Agents use `ssh -o BatchMode=yes torch ...` through the existing master.
-4. If the master dies, agent commands fail quickly and the guardian requests
+1. The user completes NYU/MFA once so the browser has a trusted cached session.
+2. Later `autotorch connect` runs enter the device code, select the default
+   signed-in NYU account, confirm Continue, and submit to SSH automatically.
+3. AutoTorch verifies and preserves the SSH master.
+4. Agents use `ssh -o BatchMode=yes torch ...` through the existing master.
+5. If the master dies, agent commands fail quickly and the guardian requests
    user action only when necessary.
 
 The bundled [`torch-hpc` Codex skill](skills/torch-hpc/SKILL.md) adds the NYU
@@ -28,8 +30,11 @@ Apptainer, and evidence-based troubleshooting.
 ## Security boundary
 
 - AutoTorch may open Microsoft's official device-login page, type the
-  short-lived device code, and submit **Next** once.
-- It never stores or types an NYU password and never approves Duo.
+  short-lived device code, select the already signed-in default NYU account,
+  and accept Microsoft's Continue confirmation.
+- It never stores or types an NYU password and cannot fabricate a new Duo
+  factor. If the cached session expires, the browser remains visible for the
+  real NYU/MFA challenge and AutoTorch uses the configured fallback wait.
 - Automatic typing runs only when Safari, Chrome, or Edge is foregrounded and
   its active tab is on a Microsoft login domain. Otherwise the device code is
   copied for manual paste.
@@ -62,9 +67,12 @@ socket directory, runs `autotorch doctor`, and asks whether to connect now.
 
 On the first connection, macOS may ask whether your terminal may control
 System Events or the browser. Allowing it lets AutoTorch enter the short-lived
-device code and submit **Next** once. If permission is denied or browser focus
-cannot be verified, AutoTorch safely puts the code in the clipboard instead.
-You still select the NYU account, enter the password, and approve Duo yourself.
+device code, select the default signed-in NYU account, and confirm the login.
+As soon as Microsoft reaches its success page, AutoTorch submits to SSH—there
+is no fixed 60-second delay. If keyboard-control permission is denied,
+AutoTorch safely puts the code in the clipboard and continues watching the
+Microsoft page without taking focus, so completed authorization is still
+submitted immediately.
 
 The permission belongs to the app that launches AutoTorch. For example, a
 connection started in Ghostty needs **Ghostty** enabled under System Settings →
@@ -118,9 +126,9 @@ chmod +x autotorch libexec/autotorch-auth.exp libexec/autotorch-browser-assist
 ./autotorch connect
 ```
 
-Complete account selection and Duo in the browser. AutoTorch waits 20 seconds
-by default before asking SSH to validate the completed browser flow. Adjust it
-when needed:
+With a cached signed-in NYU session, AutoTorch completes the browser flow and
+submits to SSH immediately. `--wait` applies only when automatic UI verification
+falls back to manual completion:
 
 ```bash
 ./autotorch connect --wait 45
@@ -190,7 +198,7 @@ Apptainer, or persistent Torch SSH tasks.
 autotorch connect                 # establish or reuse the durable master
 autotorch setup                   # interactive first-time SSH configuration
 autotorch connect --manual        # open page and copy code; no UI typing
-autotorch connect --wait 45       # allow a longer browser/Duo window
+autotorch connect --wait 45       # manual/fallback browser window only
 autotorch status                  # query the local control master
 autotorch agent-check             # verify non-interactive agent access
 autotorch stop                    # close the master cleanly
@@ -213,7 +221,14 @@ rsync -av data/ torch:~/data/
 AutoTorch keeps a healthy client connection alive indefinitely, subject to VPN,
 laptop, network, login-node, and NYU server policy. It cannot silently cross a
 new Microsoft/Duo challenge after a reboot, VPN change, long sleep, login-node
-restart, or server-side termination. That boundary is intentional.
+restart, or server-side termination. When the browser's trusted NYU session is
+still valid, AutoTorch can recreate the master with zero clicks. A genuinely
+new password or MFA challenge remains an institutional security boundary.
+
+`autotorch status` reports whether the local OpenSSH control process exists.
+`autotorch connect` and `autotorch agent-check` additionally open a bounded
+read-only session, so a control socket that cannot actually run agent commands
+is rejected instead of being reported as ready.
 
 ## Troubleshooting
 

@@ -70,6 +70,20 @@ FAKE_SSH
 cat > "$TMP/bin/browser-helper" <<'FAKE_BROWSER'
 #!/usr/bin/env bash
 printf '%s %s\n' "$1" "$3" >> "$FAKE_BROWSER_CALL"
+if [[ "$3" == "status" && "${FAKE_BROWSER_STATUS_COMPLETE:-0}" == "1" ]]; then
+  if [[ ! -e "$FAKE_BROWSER_STATUS_SEEN" ]]; then
+    : > "$FAKE_BROWSER_STATUS_SEEN"
+    printf 'AUTOTORCH_AUTH_STATE=device\n'
+  else
+    printf 'AUTOTORCH_AUTH_STATE=success\n'
+  fi
+elif [[ "$3" == "status" ]]; then
+  printf 'AUTOTORCH_AUTH_STATE=other\n'
+elif [[ "$3" == "auto" ]]; then
+  printf 'AUTOTORCH_AUTH_COMPLETE=1\n'
+else
+  printf 'AUTOTORCH_AUTH_COMPLETE=0\n'
+fi
 printf 'Browser helper test double completed.'
 FAKE_BROWSER
 
@@ -181,6 +195,26 @@ line_count_after="$(wc -l < "$FAKE_BROWSER_CALL" | tr -d ' ')"
 stop_output="$($ROOT/autotorch stop --host torch 2>&1)"
 assert_contains "$stop_output" "closed the torch SSH master"
 [[ ! -f "$FAKE_MASTER_STATE" ]] || fail "stop did not remove the master"
+
+SECONDS=0
+automatic_output="$($ROOT/autotorch connect --host torch --wait 300 vv)"
+automatic_elapsed="$SECONDS"
+assert_contains "$automatic_output" "Browser authentication completed; submitting to SSH immediately"
+assert_contains "$automatic_output" "SSH master ready"
+(( automatic_elapsed < 5 )) || fail "completed browser auth still waited for --wait"
+$ROOT/autotorch stop --host torch >/dev/null 2>&1
+
+export FAKE_BROWSER_STATUS_COMPLETE=1
+export FAKE_BROWSER_STATUS_SEEN="$TMP/browser-status-seen"
+SECONDS=0
+fallback_output="$($ROOT/autotorch connect --host torch --manual --wait 300 vv)"
+fallback_elapsed="$SECONDS"
+unset FAKE_BROWSER_STATUS_COMPLETE
+unset FAKE_BROWSER_STATUS_SEEN
+assert_contains "$fallback_output" "Microsoft success detected; submitting to SSH immediately"
+assert_contains "$fallback_output" "SSH master ready"
+(( fallback_elapsed < 5 )) || fail "fallback success polling still waited for --wait"
+$ROOT/autotorch stop --host torch >/dev/null 2>&1
 
 CODEX_HOME="$TMP/codex" "$ROOT/scripts/install-skill.sh" >/dev/null
 [[ -f "$TMP/codex/skills/torch-hpc/SKILL.md" ]] || fail "skill installer did not copy SKILL.md"

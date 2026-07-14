@@ -16,9 +16,12 @@ Torch. Keep authentication user-approved and keep compute work off login nodes.
    skills/torch-hpc/scripts/preflight.sh torch
    ```
 
-2. If it reports no authenticated master, stop remote work and ask the user to
-   run `autotorch connect` locally, finish Microsoft login, and approve Duo.
-   Never automate the password or Duo approval.
+2. If it reports no authenticated master, run `autotorch connect` locally.
+   When the browser has a cached NYU session, AutoTorch completes the device
+   code, default-account, and Continue steps automatically and submits to SSH
+   as soon as Microsoft reports success. If Microsoft instead presents a new
+   password or MFA challenge, stop and ask the user to complete that genuine
+   factor; never fabricate or store it.
    For an unconfigured machine, ask the user to run `autotorch setup` first;
    the interactive setup safely backs up and configures `~/.ssh/config`.
 3. After preflight succeeds, run every agent SSH command with:

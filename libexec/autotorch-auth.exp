@@ -1,8 +1,9 @@
 #!/usr/bin/expect -f
 
 # Start a durable OpenSSH master and complete Torch's device-code handshake.
-# The browser helper may enter the one-time code and press Next, but the user
-# remains responsible for account selection, password entry, and Duo approval.
+# With a cached NYU browser session, the browser helper completes the device
+# code, default-account, and Continue steps. A new password or MFA challenge
+# remains outside AutoTorch and falls back to a user-visible browser flow.
 
 set timeout 180
 
@@ -84,17 +85,47 @@ expect {
       exit 1
     }
 
+    set browser_complete 0
+    set helper_message ""
     if {[catch {exec $browser_helper $login_url $pin $ui_mode 2>@1} helper_output]} {
       log 0 "Could not launch browser assistance."
       log 2 "Browser helper diagnostic: [string trim $helper_output]"
       log 0 "Open $login_url and enter the code shown by SSH manually."
-    } elseif {$verbose >= 1 && [string trim $helper_output] ne ""} {
-      log 1 [string trim $helper_output]
+    } else {
+      set browser_complete [regexp {AUTOTORCH_AUTH_COMPLETE=1} $helper_output]
+      regsub -all {AUTOTORCH_AUTH_COMPLETE=[01][\r\n]*} $helper_output "" helper_message
+      if {$verbose >= 1 && [string trim $helper_message] ne ""} {
+        log 1 [string trim $helper_message]
+      }
     }
 
-    log 0 "Complete account selection and Duo in the browser."
-    log 0 "AutoTorch will submit the completed browser authentication in ${auth_wait}s."
-    after [expr {$auth_wait * 1000}]
+    if {$browser_complete} {
+      log 0 "Browser authentication completed; submitting to SSH immediately."
+    } else {
+      log 0 "Complete any remaining account or MFA step in the browser."
+      log 0 "Fallback mode is watching for Microsoft's success page for up to ${auth_wait}s."
+      set auth_deadline [expr {[clock milliseconds] + ($auth_wait * 1000)}]
+      set saw_current_browser_flow 0
+      while {[clock milliseconds] < $auth_deadline} {
+        set status_output ""
+        if {![catch {exec $browser_helper $login_url $pin status 2>@1} status_output]} {
+          if {[regexp {AUTOTORCH_AUTH_STATE=(device|confirmation)} $status_output]} {
+            set saw_current_browser_flow 1
+          }
+          if {$saw_current_browser_flow &&
+              [regexp {AUTOTORCH_AUTH_STATE=success} $status_output]} {
+            set browser_complete 1
+            break
+          }
+        }
+        after 500
+      }
+      if {$browser_complete} {
+        log 0 "Microsoft success detected; submitting to SSH immediately."
+      } else {
+        log 0 "Browser success was not detected before the fallback deadline; asking SSH to re-check."
+      }
+    }
 
     # Torch explicitly asks the SSH client to press Enter only after the web
     # authentication has completed. Exactly one Enter is sent.
@@ -129,9 +160,9 @@ if {$auth_failed} {
 after 500
 if {[master_ready $server]} {
   if {$saw_device_code} {
-    log 0 "SSH master ready. New terminals and IDE sessions can reuse it."
+    log 0 "SSH control master created; verifying a reusable agent session."
   } else {
-    log 0 "SSH master restored without a new interactive MFA prompt."
+    log 0 "SSH control master restored; verifying a reusable agent session."
   }
   exit 0
 }
